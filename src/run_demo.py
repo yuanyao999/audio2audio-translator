@@ -2,76 +2,73 @@ import os
 import argparse
 import logging
 import whisper
-from transformers import MarianMTModel, MarianTokenizer
+from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 from tqdm import tqdm
 from jiwer import wer
-from TTS.api import TTS  # Coqui TTS
+from TTS.api import TTS
 
 # ---------------------------
-# Argument Parsing
+# 多语言支持映射表（英、法、德）
 # ---------------------------
-parser = argparse.ArgumentParser(description="Demo script: ASR→MT→TTS using Coqui TTS only")
-parser.add_argument(
-    "--in-dir",
-    default="data/processed/asr/commonvoice_demo/wav16k",
-    help="Input directory with 16 kHz WAV files",
-)
-parser.add_argument(
-    "--out-dir",
-    default="outputs",
-    help="Output directory for synthesized WAV files",
-)
-parser.add_argument(
-    "--model",
-    default="tiny",
-    help="Whisper ASR model size (tiny/base/small/medium/large)",
-)
-parser.add_argument(
-    "--num-ex",
-    type=int,
-    default=5,
-    help="Number of examples to process",
-)
-parser.add_argument(
-    "--ref-trans",
-    default="data/raw/asr/commonvoice_demo/transcripts.txt",
-    help="Reference transcripts for WER evaluation",
-)
+TGT_LANG_MAP = {
+    "en": "en",
+    "fr": "fr",
+    "de": "de",
+}
+
+LANG_TO_TTS_MODEL = {
+    "en": "tts_models/en/ljspeech/tacotron2-DDC",
+    "fr": "tts_models/fr/css10/vits",
+    "de": "tts_models/de/thorsten/tacotron2-DCA",
+}
+
+# ---------------------------
+# CLI 参数解析
+# ---------------------------
+parser = argparse.ArgumentParser(description="ASR → MT → TTS (M2M100 多语言支持)")
+parser.add_argument("--in-dir", default="data/processed/asr/commonvoice_demo/wav16k", help="输入音频目录")
+parser.add_argument("--out-dir", default="outputs", help="输出音频目录")
+parser.add_argument("--model", default="tiny", help="Whisper ASR 模型大小")
+parser.add_argument("--target-lang", default="en", choices=list(TGT_LANG_MAP.keys()), help="目标语言")
+parser.add_argument("--num-ex", type=int, default=5, help="处理样本数量")
+parser.add_argument("--ref-trans", default="data/raw/asr/commonvoice_demo/transcripts.txt", help="参考转写")
 args = parser.parse_args()
 
 # ---------------------------
-# Logging Setup
+# 日志设置
 # ---------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # ---------------------------
-# Load Models
+# 加载 Whisper 模型
 # ---------------------------
-logging.info(f"Loading Whisper model: {args.model}")
+logging.info(f"加载 Whisper 模型：{args.model}")
 asr_model = whisper.load_model(args.model)
 
-mt_name = "Helsinki-NLP/opus-mt-zh-en"
-logging.info(f"Loading MT model: {mt_name}")
-tokenizer = MarianTokenizer.from_pretrained(mt_name)
-mt_model  = MarianMTModel.from_pretrained(mt_name)
+# ---------------------------
+# 加载 M2M100 模型
+# ---------------------------
+MT_MODEL_NAME = "facebook/m2m100_418M"
+logging.info(f"加载 M2M100 模型：{MT_MODEL_NAME}")
+tokenizer = M2M100Tokenizer.from_pretrained(MT_MODEL_NAME)
+mt_model = M2M100ForConditionalGeneration.from_pretrained(MT_MODEL_NAME)
+tokenizer.src_lang = "zh"
+tgt_lang = TGT_LANG_MAP[args.target_lang]
 
 # ---------------------------
-# Initialize Coqui TTS
+# 加载 TTS 模型
 # ---------------------------
-logging.info("Initializing Coqui TTS")
-tts = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC", progress_bar=False, gpu=False)
+tts_model_name = LANG_TO_TTS_MODEL[args.target_lang]
+logging.info(f"加载 TTS 模型：{tts_model_name}")
+tts = TTS(model_name=tts_model_name, progress_bar=False, gpu=False)
 
 # ---------------------------
-# Prepare I/O
+# 目录准备
 # ---------------------------
-in_dir  = args.in_dir
-out_dir = args.out_dir
+in_dir = args.in_dir
+out_dir = os.path.join(args.out_dir, args.target_lang)
 os.makedirs(out_dir, exist_ok=True)
 
-# Load reference transcripts
 ref_dict = {}
 if os.path.exists(args.ref_trans):
     with open(args.ref_trans, encoding="utf-8") as f:
@@ -79,47 +76,48 @@ if os.path.exists(args.ref_trans):
             idx, txt = line.strip().split("|", 1)
             ref_dict[idx] = txt
 
-# Metric lists
-hyp_texts = []
-ref_texts = []
+ref_texts, hyp_texts = [], []
 
 # ---------------------------
-# Run Demo
+# 主处理流程
 # ---------------------------
 wav_files = sorted(f for f in os.listdir(in_dir) if f.endswith(".wav"))
-total     = min(args.num_ex, len(wav_files))
+total = min(args.num_ex, len(wav_files))
 
 for i, fn in enumerate(tqdm(wav_files[:total], desc="Processing")):
-    idx      = fn.replace(".wav", "")
+    idx = fn.replace(".wav", "")
     wav_path = os.path.join(in_dir, fn)
 
-    # ASR → 中文
-    res = asr_model.transcribe(wav_path)
-    zh  = res["text"].strip()
+    # ASR
+    res = asr_model.transcribe(wav_path, language="zh")
+    zh = res["text"].strip()
 
-    # MT → 英文
-    batch = tokenizer(zh, return_tensors="pt", padding=True)
-    gen   = mt_model.generate(**batch)
-    en    = tokenizer.decode(gen[0], skip_special_tokens=True)
+    # MT
+    batch = tokenizer(zh, return_tensors="pt")
+    gen = mt_model.generate(
+        **batch,
+        forced_bos_token_id=tokenizer.lang_code_to_id[tgt_lang]
+    )
+    translated = tokenizer.decode(gen[0], skip_special_tokens=True)
 
     print(f"[{i+1}] {fn}")
     print("  ASR:", zh)
-    print("   MT:", en)
+    print(f"   MT ({args.target_lang}):", translated)
 
-    # TTS → 英语 WAV (Coqui)
-    out_wav = os.path.join(out_dir, f"{idx}_en.wav")
-    tts.tts_to_file(text=en, file_path=out_wav)
+    # TTS
+    out_wav = os.path.join(out_dir, f"{idx}_{args.target_lang}.wav")
+    tts.tts_to_file(text=translated, file_path=out_wav)
     print("  TTS →", out_wav)
 
-    # Collect for WER metric
     if idx in ref_dict:
         ref_texts.append(ref_dict[idx])
         hyp_texts.append(zh)
 
 # ---------------------------
-# Evaluate WER
+# 评估 WER（可选）
 # ---------------------------
 if ref_texts and hyp_texts:
-    logging.info(f"WER: {wer(ref_texts, hyp_texts):.2f}")
+    score = wer(ref_texts, hyp_texts)
+    logging.info(f"WER (ASR only): {score:.2f}")
 
-logging.info("Demo complete.")
+logging.info("✅ 完成！")

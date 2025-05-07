@@ -1,0 +1,12 @@
+openai-whisper
+torch
+torchaudio
+transformers
+sentencepiece
+datasets
+soundfile
+librosa
+tqdm
+jiwer
+TTS
+gradio
