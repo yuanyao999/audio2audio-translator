@@ -25,6 +25,7 @@ audio2audio-translator/
 ├── venv/                            # Python 虚拟环境（未上传）
 ├── requirements.txt                 # Python 依赖清单
 └── README.md                        # 本说明文件
+└── app.py 
 ```
 
 ---
@@ -127,6 +128,14 @@ python src/run_demo.py --in-dir data/processed/asr/commonvoice_demo/wav16k \
 * 在日志中输出 WER 评分
 
 ---
+## 🖥️ 可视化界面
+
+本项目提供一个 Gradio 网页界面：
+
+```bash
+pip install gradio
+python app.py
+
 
 ## 模型说明
 
